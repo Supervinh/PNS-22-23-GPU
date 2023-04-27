@@ -1,17 +1,18 @@
 import math
 import sys
+import warnings
 
 import numba as nb
 import numpy as np
 from numba import cuda
-import warnings
+
 warnings.filterwarnings("ignore")
 
 THREAD_BLOCK = 32
 
 
-def scanGPU(array, independant_recursif):
-    n = array.shape[0]
+def scanGPU(array, independant=False):
+    n = array.size
     blocs_per_grid = int(math.ceil(n / THREAD_BLOCK))
 
     # On copie le tableau sur la mémoire GPU
@@ -27,9 +28,13 @@ def scanGPU(array, independant_recursif):
     # On récupère le tableau depuis la mémoire GPU
     array = array_device.copy_to_host()
 
-    # Si on n'a pas donné de paramètre indépendant, on lance la fonction récursive sur le tableau intermédiaire
-    if not (independant_recursif or blocs_per_grid == 1):
-        array_intermediaire = scanGPU(array_intermediaire, independant_recursif)
+    # Si in dépendant, on retourne le tableau sans "terminer" le scan
+    if independant:
+        return array
+
+    # on lance la fonction récursive sur le tableau intermédiaire si besoin
+    if not (blocs_per_grid == 1):
+        array_intermediaire = scanGPU(array_intermediaire)
 
         # On alloue l'espace nécessaire pour le tableau intermédiaire sur la mémoire GPU
         array_intermediaire_device = cuda.to_device(array_intermediaire)
@@ -44,21 +49,19 @@ def scanGPU(array, independant_recursif):
     return array
 
 
-
 @cuda.jit
 def scanKernel(array_a, array_b):
-    n = array_a.shape[0]
+    n = array_a.size
     m = int(math.ceil(math.log2(n)))
     if n > THREAD_BLOCK:
         n = THREAD_BLOCK  # On ne peut pas utiliser plus de THREAD_BLOCK threads
     elif n != 2 ** m:  # Si n n'est pas une puissance de 2 on le transforme en une puissance de 2
         n = 2 ** m
-    cuda.syncthreads()
     tid = cuda.threadIdx.x
     global_id = cuda.grid(1)
     cuda.syncthreads()
 
-    shared_filter = cuda.shared.array(THREAD_BLOCK, dtype=nb.int32)
+    shared_filter = cuda.shared.array(THREAD_BLOCK, dtype=nb.int32)  # On crée un tableau partagé entre les threads
     shared_filter[tid] = array_a[global_id]
     cuda.syncthreads()
 
@@ -96,6 +99,7 @@ def fullArray(array_a, array_b):
     array_a[global_id] = array_a[global_id] + array_b[bid]
 
 
+# Fonction qui affiche le tableau conformément aux specs du projet
 def showArray(array):
     output = ""
     for i in range(array.size):
@@ -117,29 +121,40 @@ def runScan():
 
     # On lit le fichier et on récupère l'array à scanner
     file = sys.argv[1]
-    array_to_scan = open(file, "r").read().split(',')
+    try:
+        array_to_scan = np.loadtxt(file, delimiter=',', dtype=np.int32)
+    except:
+        print("Erreur lors de la lecture du fichier")
+        sys.exit(1)
     if array_to_scan[-1] == '':  # On regarde si le fichier est vide
         print("le fichier est vide")
         sys.exit(1)
     array_to_scan = np.array(array_to_scan, dtype=np.int32)
 
-    # On récupère les paramètres
+    # On récupère les paramètres et on gère les erreurs
     for i in range(2, len(sys.argv)):
+        # Si on nous donne un nombre de thread_block
         if sys.argv[i] == "--tb":
+            # On vérifie qu'il y a bien un argument après
             if i + 1 >= len(sys.argv):
                 print("Usage: python project-gpu.py <inputFile> [--tb int] [--independent] [--inclusive]")
                 sys.exit(1)
-            if not sys.argv[i + 1].isdigit():
-                print("Usage: python project-gpu.py <inputFile> [--tb int] [--independent] [--inclusive]")
+            # On vérifie que l'argument est bien un nombre sinon on catch l'erreur
+            try:
+                thread_block_temp = int(sys.argv[i + 1])
+            except:
+                print("Erreur dans le paramètre --tb")
                 sys.exit(1)
-            thread_block_temp = int(sys.argv[i + 1])
+            # On vérifie que le nombre est bien une puissance de 2 sinon on le transforme en puissance de 2
             if math.log2(thread_block_temp) != int(math.log2(thread_block_temp)):
                 THREAD_BLOCK = 2 ** int(math.ceil(math.log2(thread_block_temp)))
             else:
                 THREAD_BLOCK = thread_block_temp
             i += 1
+        # Si on nous demande un scan indépendant
         elif sys.argv[i] == "--independent":
             independant = True
+        # Si on nous demande un scan inclusif
         elif sys.argv[i] == "--inclusive":
             inclusive = True
 
